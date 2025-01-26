@@ -5,11 +5,14 @@ from ppo import PPO  # Make sure 'ppo.py' is in the same folder or in your Pytho
 import matplotlib.pyplot as plt
 
 device = t.device("cuda" if t.cuda.is_available() else "cpu")
-def train_ppo():
-    env = gym.make("Pendulum-v1")
+def train_ppo(env_name):
+    env = gym.make(env_name)
+    actionspace = env.action_space.shape[0]
+    obsspace = env.observation_space.shape[0]
+    #print(f"actionspace: {actionspace}, obs space {obsspace}")
     agent = PPO(
-        ob_space=3,
-        actions=1,
+        ob_space=obsspace,
+        actions=actionspace,
         n_batches=10,
         gamma=0.99,
         lam=0.95,
@@ -17,15 +20,15 @@ def train_ppo():
         clip_rewards=False,
         clip_param=0.2,
         vf_clip_param=10.0,
-        entropy_coeff=0.01,
+        entropy_coeff=0,
         a_lr=1e-4,
         c_lr=1e-4,
         device='cpu',
-        max_ts=500_000,
+        max_ts=100,
 
         # Any custom kwargs can also be passed in here. For example:
-        timesteps_per_batch=10,
-        max_timesteps_per_episode=200,
+        rollouts_per_batch=1,
+        max_timesteps_per_episode=1000,
         n_updates_per_iteration=3,
     )
     
@@ -37,9 +40,9 @@ def train_ppo():
     env.close()
     return agent
 
-def test_ppo(ppo_agent):
+def test_ppo(ppo_agent, env_name):
     # Create the environment in 'human' render mode so it shows visualization
-    env = gym.make("Pendulum-v1", render_mode='human')
+    env = gym.make(env_name, render_mode='human')
 
     # Reset the environment to get the initial observation
     observation, info = env.reset()
@@ -113,6 +116,7 @@ def plot_eps_rewards(agent, window_size=10):
 
 
 if __name__ == "__main__":
-    agent = train_ppo()
-    test_ppo(agent)
+    env_name = "HalfCheetah-v4"
+    agent = train_ppo(env_name)
+    test_ppo(agent, env_name)
     plot_eps_rewards(agent)
