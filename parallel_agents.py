@@ -1,22 +1,25 @@
 import gym
 import numpy as np
 import torch as t
-from ppo import PPO  # Make sure 'ppo.py' is in the same folder or in your Python path
+from opt_ppo import PPO  # Make sure 'ppo.py' is in the same folder or in your Python path
 import matplotlib.pyplot as plt
 
 device = t.device("cuda" if t.cuda.is_available() else "cpu")
+
 def train_ppo(env_name):
     env = gym.make(env_name)
     actionspace = env.action_space.shape[0]
     obsspace = env.observation_space.shape[0]
     print(f"actionspace: {actionspace}, obs space {obsspace}")
-    agent = PPO(
+
+    # make parallel agents 
+    rollout_agent = PPO(
         ob_space=obsspace,
         actions=actionspace,
         n_batches=10,
         gamma=0.99,
         lam=0.95,
-        kl_coeff=0.2,
+        kl_coeff=0.2, 
         clip_rewards=False,
         clip_param=0.2,
         vf_clip_param=10.0,
@@ -31,18 +34,62 @@ def train_ppo(env_name):
         max_timesteps_per_episode=1000,
         n_updates_per_iteration=3,
     )
+    training_agent = PPO(
+        ob_space=obsspace,
+        actions=actionspace,
+        n_batches=10,
+        gamma=0.99,
+        lam=0.95,
+        kl_coeff=0.2, 
+        clip_rewards=False,
+        clip_param=0.2,
+        vf_clip_param=10.0,
+        entropy_coeff=0,
+        a_lr=1e-4,
+        c_lr=1e-4,
+        device=device,
+        max_ts=100,
+
+        # Any custom kwargs can also be passed in here. For example:
+        rollouts_per_batch=1,
+        max_timesteps_per_episode=1000,
+        n_updates_per_iteration=3,
+    )
     
-    # 3. Train the agent
+    
+    # 3. Main training loop
     total_timesteps = 1_000_000  # Decide how long you want to train
-    agent.learn(total_timesteps=total_timesteps, env=env)
+    #print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
+    #print(f"{self.rollouts_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
+    t_so_far = 0 # Timesteps simulated so far
+    i_so_far = 0 # Iterations ran so far
+    while t_so_far < total_timesteps:                                                                      
+        b_obs, actions, advantages, returns, act_log_probs, ep_rewards = rollout_agent.rollout(env) 
+        b_obs, actions, advantages, returns, act_log_probs, ep_rewards = training_agent.vectorize(b_obs, actions, advantages, returns, act_log_probs, ep_rewards)
+
+
+        # Calculate how many timesteps we collected this batch
+        t_so_far += b_obs.shape[0]
+
+        training_agent.learn(b_obs, actions, advantages, returns, act_log_probs, ep_rewards)
+
+        rollout_agent.actor.load_state_dict(training_agent.actor.state_dict())
+        rollout_agent.critic.load_state_dict(training_agent.critic.state_dict())
+
+
+
+
+
+
+    #agent.learn(total_timesteps=total_timesteps, env=env)
     
     # 4. Close the environment
     env.close()
-    return agent
+    return training_agent
 
 def test_ppo(ppo_agent, env_name):
     # Create the environment in 'human' render mode so it shows visualization
-    env = gym.vector.make(env_name, render_mode='human')
+    env = gym.make(env_name, render_mode='human')
 
     # Reset the environment to get the initial observation
     observation, info = env.reset()

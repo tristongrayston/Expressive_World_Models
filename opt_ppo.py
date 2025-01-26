@@ -6,13 +6,8 @@ import time
 import os.path as osp
 
 '''
-Note, for pendulum, the episodes trunicate at 200 time steps and has no failure condition. 
-TODO: Turns out, moving things to gpu doesn't make things quicker if you have a small enough model such that
-the transfer from gpu -> cpu is outpaced by the time it takes for your data to go through your model. 
-Making this quicker, then, is for a time when we can run multiple envs at the same time. until then, cpu it is! 
+-
 '''
-#t.autograd.set_detect_anomaly(True)
-
 class PPO:
     def __init__(
         self,
@@ -143,8 +138,7 @@ class PPO:
         #self.critic_scheduler = optim.lr_scheduler.ExponentialLR(self.critic_optim, gamma=0.9999)
 
         # compile
-        #self.actor = t.compile(self.actor)
-        #self.critic = t.compile(self.critic)
+        
 
         self.cov_var = t.full(size=(self.actions,), fill_value=0.1).to(self.device)
         self.cov_mat = t.diag(self.cov_var).to(self.device)
@@ -320,8 +314,11 @@ class PPO:
             ep_returns = self.discount_rewards(rollout_reward)
             returns.append(ep_returns)
 
+        return b_obs, actions, advantages, returns, act_log_probs, ep_rewards
+    
+    def vectorize(self, b_obs, actions, advantages, returns, act_log_probs, ep_rewards):
         # turn things into tensors
-        b_obs = t.stack(b_obs, dim=0)
+        b_obs = t.stack(b_obs, dim=0).to(self.device)
         
         actions = np.stack(actions, axis=0)  
         actions = t.tensor(actions, device=self.device, dtype=t.float32)
@@ -331,12 +328,16 @@ class PPO:
         advantages = advantages.view(-1, 1)
 
         #act_log_probs = np.stack(act_log_probs, axis=0)  
-        act_log_probs = t.stack(act_log_probs, dim=0)
+        act_log_probs = t.stack(act_log_probs, dim=0).to(self.device)
 
-        returns = t.stack(returns, dim=0)
+        returns = t.stack(returns, dim=0).to(self.device)
         returns = returns.view(-1, 1)
 
         act_log_probs = act_log_probs.view(-1, 1)
+
+        # normalize returns and advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
+        returns = (returns - returns.mean()) / (returns.std() + 1e-10)
         
         #print("b_obs shape:", b_obs.shape)
         #print("actions shape:", actions.shape)
@@ -348,9 +349,13 @@ class PPO:
 
         return b_obs, actions, advantages, returns, act_log_probs, ep_rewards
 
-    def learn(self, total_timesteps, env):
+
+    def learn(self, obs, actions, advantages, returns, act_log_probs, ep_reward):
         """
             Train the actor and critic networks. Here is where the main PPO algorithm resides.
+
+            The seperation in this version of PPO is that we seperate the learning process with the experience process to allow for a seperation of 
+            rollout collection and training. 
 
             Parameters:
                 total_timesteps - the total number of timesteps to train for
@@ -358,80 +363,73 @@ class PPO:
             Return:
                 None
         """
-        print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
-        print(f"{self.rollouts_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
-        t_so_far = 0 # Timesteps simulated so far
-        i_so_far = 0 # Iterations ran so far
-        while t_so_far < total_timesteps:                                                                      
-            obs, actions, advantages, returns, act_log_probs, ep_reward = self.rollout(env) 
+
+        # This is the loop where we update our network for some n epochs
+        for iters in range(self.n_updates_per_iteration):
+            mean_kld_track = []
+            obs_batched, actions_batched, advantages_batched, returns_batched, log_probs_batched = \
+                self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=100)
+
+            # obs_batched is now shape (num_batches, batch_size, obs_dim)
+            # So you can do:
+            for batch_i in range(obs_batched.shape[0]):
+                mb_obs        = obs_batched[batch_i]
+                mb_actions    = actions_batched[batch_i]
+                mb_advantages = advantages_batched[batch_i]
+                mb_returns    = returns_batched[batch_i]
+                mb_act_log_probs  = log_probs_batched[batch_i]
+
+                #for mb_obs, mb_actions, mb_advantages, mb_returns, mb_act_log_probs in \
+                #self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=500):  
+
+
+                self.actor_optim.zero_grad()
+                self.critic_optim.zero_grad()
+
+                # Calculate V_phi and pi_theta(a_t | s_t)
+                V, curr_log_probs, entropy = self.evaluate(mb_obs, mb_actions)
+
+                V = V.view(-1, 1)
+                curr_log_probs = curr_log_probs.view(-1, 1)
+
+                ratios = t.exp(curr_log_probs - mb_act_log_probs)
+
+                # Calculate surrogate losses.
+                surr1 = ratios * mb_advantages
+                surr2 = t.clamp(ratios, 1 - self.clip, 1 + self.clip) * mb_advantages
+
+                actor_loss = -(t.min(surr1, surr2)).mean() - self.entropy_coeff * entropy
+                critic_loss = nn.MSELoss()(V, mb_returns)
+
+                # steady updates wanted, so if we change too much we cancel the training entirely and
+                # run the next n rollouts.
+                #kld = t.abs((curr_log_probs - mb_act_log_probs).mean())
+                #kld = sum(mean_kld_track)/len(mean_kld_track)
+                #print(kld)
+                #if kld >= self.target_kld:
+                    #print("Break KLD", kld)
+                    #print("no iters, ", iters)
+                    #break
+
+                # Calculate gradients and perform backward propagation for both network
+                
+                actor_loss.backward(retain_graph=True)
+                critic_loss.backward()
+                self.actor_optim.step()
+                self.critic_optim.step()
+
+                # Log actor loss
+                #print("actor loss: ", actor_loss.detach().item())
+
+                
+                mean_kld_track.append(0)
             
-            # Calculate how many timesteps we collected this batch
-            t_so_far += obs.shape[0]
+            self.logger['actor_losses'].append(actor_loss.cpu().detach())
 
-            # Increment the number of iterations
-            i_so_far += 1
-
-            # Logging timesteps so far and iterations so far
-            self.logger['t_so_far'] = t_so_far
-            self.logger['i_so_far'] = i_so_far
-
-            # normalize returns and advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
-            returns = (returns - returns.mean()) / (returns.std() + 1e-10)
-
-            # This is the loop where we update our network for some n epochs
-            for iters in range(self.n_updates_per_iteration):
-                mean_kld_track = []
-                for mb_obs, mb_actions, mb_advantages, mb_returns, mb_act_log_probs in \
-                    self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=100):  
-                    self.actor_optim.zero_grad()
-                    self.critic_optim.zero_grad()
-
-                    # Calculate V_phi and pi_theta(a_t | s_t)
-                    V, curr_log_probs, entropy = self.evaluate(mb_obs, mb_actions)
-
-                    V = V.view(-1, 1)
-                    curr_log_probs = curr_log_probs.view(-1, 1)
-
-                    ratios = t.exp(curr_log_probs - mb_act_log_probs)
-
-                    # Calculate surrogate losses.
-                    surr1 = ratios * mb_advantages
-                    surr2 = t.clamp(ratios, 1 - self.clip, 1 + self.clip) * mb_advantages
-
-                    actor_loss = -(t.min(surr1, surr2)).mean() - self.entropy_coeff * entropy
-                    critic_loss = nn.MSELoss()(V, mb_returns)
-
-                    # steady updates wanted, so if we change too much we cancel the training entirely and
-                    # run the next n rollouts.
-                    #kld = t.abs((curr_log_probs - mb_act_log_probs).mean())
-                    #kld = sum(mean_kld_track)/len(mean_kld_track)
-                    #print(kld)
-                    #if kld >= self.target_kld:
-                        #print("Break KLD", kld)
-                        #print("no iters, ", iters)
-                        #break
-
-                    # Calculate gradients and perform backward propagation for both network
-                    
-                    actor_loss.backward(retain_graph=True)
-                    critic_loss.backward()
-                    self.actor_optim.step()
-                    self.critic_optim.step()
-
-                    # Log actor loss
-                    #print("actor loss: ", actor_loss.detach().item())
-
-                    
-                    mean_kld_track.append(0)
-
-                
-                self.logger['actor_losses'].append(actor_loss.cpu().detach())
-
-                
-
-            # Print a summary of our training so far
-            self._log_summary(ep_reward, obs.shape[0])
+            
+        self.logger['i_so_far'] += 1
+        # Print a summary of our training so far
+        self._log_summary(ep_reward, obs.shape[0])
 
     def create_minibatches(self, obs, actions, advantages, returns, act_log_probs,
                         batch_size=64, shuffle=True):
@@ -465,6 +463,7 @@ class PPO:
         
         # Number of samples (timesteps) in the rollout
         n_samples = len(obs)
+
         
         # Optionally shuffle the data (consistent across all arrays)
         if shuffle:
@@ -476,6 +475,14 @@ class PPO:
             act_log_probs = act_log_probs[indices]
         
         # Generate minibatches
+
+        obs = obs.view(n_samples//batch_size, batch_size, -1)
+        actions = actions.view(n_samples//batch_size, batch_size, -1)
+        advantages = advantages.view(n_samples//batch_size, batch_size, -1)
+        returns = returns.view(n_samples//batch_size, batch_size, -1)
+        act_log_probs = act_log_probs.view(n_samples//batch_size, batch_size, -1)
+
+        """
         for start_idx in range(0, n_samples, batch_size):
             end_idx = min(start_idx + batch_size, n_samples)
 
@@ -486,7 +493,9 @@ class PPO:
                 returns[start_idx:end_idx],
                 act_log_probs[start_idx:end_idx],
             )
+        """
 
+        return (obs, actions, advantages, returns, act_log_probs)
 
     def _log_summary(self, eps_rewards, no_timesteps):
         """
