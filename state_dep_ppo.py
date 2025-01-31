@@ -91,7 +91,7 @@ class PPO:
         self.rollouts_per_batch = rollouts_per_batch
         self.max_timesteps_per_episode = max_timesteps_per_episode
         self.n_updates_per_iteration = n_updates_per_iteration
-        self.backbone = True # so far this does nothing, but it would be great if we changed it to do things. 
+        self.backbone = True 
 
         # Optionally store any extra keyword arguments
         for key, value in kwargs.items():
@@ -111,7 +111,7 @@ class PPO:
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(64, actions),
+            nn.Linear(64, actions * 2),
             nn.Tanh()
         ).to(self.device)
 
@@ -174,15 +174,29 @@ class PPO:
         # This might be wrong, check on this later
         with t.no_grad():
             #feats = self.backbone(obs)
-            mean = self.actor(obs)*2 # unique to pendulum
+            feats = self.actor(obs)
+            means, logstd = t.split(feats, self.actions, dim=-1)
 
-        dist = t.distributions.MultivariateNormal(mean, self.cov_mat)
+        #print("MEANS: ", means)
+        #print("LOG VARS: ", logvars)
+
+        means = means*2
+        logstd = t.clamp(logstd, min=-20, max=2) # clamp std
+
+        vars_val = t.exp(0.5 * logstd)
+        #vars_val = t.clamp(vars_val, min=0, max=1) # clamp std
+
+        vars = t.diag(vars_val)
+        #print(vars)
+        dist = t.distributions.MultivariateNormal(means, vars)
 
         action = dist.sample()
 
+        action = t.clamp(action, -2.0, 2.0) # specific to pendulum, maybe helps? come back here
+
         log_prob = dist.log_prob(action)
 
-        return action.tolist(), log_prob
+        return action.tolist(), log_prob, vars
     
     def get_vf(self, obs, rollout=True):
         with t.no_grad():
@@ -214,13 +228,26 @@ class PPO:
 
         # Calculate the log probabilities of batch actions using most recent actor network.
         # This segment of code is similar to that in get_action()
-        mean = self.actor(batch_obs)*2 # unique to pendulum
-        dist = t.distributions.MultivariateNormal(mean, self.cov_mat)
+        act_feats = self.actor(batch_obs)
+        means, logstd = t.split(act_feats, self.actions, dim=-1)
+
+        logstd = t.clamp(logstd, min=-20, max=2) # clamp std
+        
+        #print(logstd)
+        means = means*2
+
+        var = t.exp(0.5 * logstd)
+        #var = t.clamp(var, min=0, max=1) # clamp std
+
+        covar = t.diag_embed(var)
+
+        dist = t.distributions.MultivariateNormal(means, covar)
+
         log_probs = dist.log_prob(batch_acts)
         entropy = dist.entropy().mean()
 
         # Return the value vector V of each observation in the batch
-        # and log probabilities log_probs of each action in the batch
+        # and log probabilities log_probs of each   action in the batch
         return V, log_probs, entropy
     
     def calculate_gaes(self, rewards, values):
@@ -279,7 +306,7 @@ class PPO:
                 # Action
                 vect_obs = t.tensor(obs, dtype=t.float32, device=self.device)
 
-                action, log_prob = self.get_action(vect_obs)
+                action, log_prob, _ = self.get_action(vect_obs)
                 vals = self.get_vf(vect_obs)
 
                 #print("action", action, " item now ", action.item())
@@ -377,7 +404,7 @@ class PPO:
 
             # normalize returns and advantages
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            returns = (returns - returns.mean()) / (returns.std() + 1e-10)
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
             # This is the loop where we update our network for some n epochs
             for iters in range(self.n_updates_per_iteration):

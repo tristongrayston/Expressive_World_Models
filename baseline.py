@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 import torch as t
-from ppo import PPO  # Make sure 'ppo.py' is in the same folder or in your Python path
+from state_indep_ppo import PPO  # or state_dep_ppo, either or.
 import matplotlib.pyplot as plt
 
 device = t.device("cuda" if t.cuda.is_available() else "cpu")
@@ -21,19 +21,19 @@ def train_ppo(env_name):
         clip_param=0.2,
         vf_clip_param=10.0,
         entropy_coeff=0,
-        a_lr=1e-3,
-        c_lr=1e-3,
+        a_lr=5e-4,
+        c_lr=5e-4,
         device='cpu',
         max_ts=100,
 
         # Any custom kwargs can also be passed in here. For example:
-        rollouts_per_batch=4,
+        rollouts_per_batch=5,
         max_timesteps_per_episode=200,
-        n_updates_per_iteration=2,
+        n_updates_per_iteration=3,
     )
     
     # 3. Train the agent
-    total_timesteps = 2000//4  # Decide how long you want to train
+    total_timesteps = 2000//5  # Decide how long you want to train
     agent.learn(total_timesteps=total_timesteps, env=env)
     
     # 4. Close the environment
@@ -42,7 +42,7 @@ def train_ppo(env_name):
 
 def test_ppo(ppo_agent, env_name):
     # Create the environment in 'human' render mode so it shows visualization
-    env = gym.vector.make(env_name, render_mode='human')
+    env = gym.make(env_name, render_mode='human')
 
     # Reset the environment to get the initial observation
     observation, info = env.reset()
