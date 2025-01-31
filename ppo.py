@@ -4,6 +4,8 @@ from torch import optim
 import numpy as np
 import time
 import os.path as osp
+from logger import logger
+from tqdm import tqdm
 
 '''
 Note, for pendulum, the episodes trunicate at 200 time steps and has no failure condition. 
@@ -32,9 +34,9 @@ class PPO:
         max_ts=100,              # max rollouts
         target_kld = 0.002,       # actor target kld 
 
-        rollouts_per_batch=5,
-        max_timesteps_per_episode=1000,
-        n_updates_per_iteration=3,
+        rollouts_per_batch=1,
+        max_timesteps_per_episode=200,
+        n_updates_per_iteration=1,
 
         **kwargs
         ):
@@ -136,8 +138,8 @@ class PPO:
         critic_params = list(self.critic.parameters())
 
         # Optimizers
-        self.actor_optim = optim.Adam(actor_params, lr=a_lr, eps=1e-5)
-        self.critic_optim = optim.Adam(critic_params, lr=c_lr, eps=1e-5)
+        self.actor_optim = optim.Adam(actor_params, lr=a_lr)
+        self.critic_optim = optim.Adam(critic_params, lr=c_lr)
 
         #self.actor_scheduler = optim.lr_scheduler.ExponentialLR(self.actor_optim, gamma=0.9999)
         #self.critic_scheduler = optim.lr_scheduler.ExponentialLR(self.critic_optim, gamma=0.9999)
@@ -146,20 +148,12 @@ class PPO:
         #self.actor = t.compile(self.actor)
         #self.critic = t.compile(self.critic)
 
-        self.cov_var = t.full(size=(self.actions,), fill_value=0.1).to(self.device)
+        self.cov_var = t.full(size=(self.actions,), fill_value=0.2).to(self.device)
         self.cov_mat = t.diag(self.cov_var).to(self.device)
 
         # Logger, credit: Eric Yang Yu
         # This logger will help us with printing out summaries of each iteration
-        self.logger = {
-            'delta_t': time.time_ns(),
-            't_so_far': 0,          # timesteps so far
-            'i_so_far': 0,          # iterations so far
-            'batch_lens': [],       # episodic lengths in batch
-            'batch_rews': [],       # episodic returns in batch
-            'actor_losses': [],     # losses of actor network in current iteration
-            'eps_rewards': []       # A track of the sum of rewards for all episodes.
-        }
+        self.logger = logger(10)
 
     def init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -180,7 +174,7 @@ class PPO:
         # This might be wrong, check on this later
         with t.no_grad():
             #feats = self.backbone(obs)
-            mean = self.actor(obs)
+            mean = self.actor(obs)*2 # unique to pendulum
 
         dist = t.distributions.MultivariateNormal(mean, self.cov_mat)
 
@@ -220,7 +214,7 @@ class PPO:
 
         # Calculate the log probabilities of batch actions using most recent actor network.
         # This segment of code is similar to that in get_action()
-        mean = self.actor(batch_obs)
+        mean = self.actor(batch_obs)*2 # unique to pendulum
         dist = t.distributions.MultivariateNormal(mean, self.cov_mat)
         log_probs = dist.log_prob(batch_acts)
         entropy = dist.entropy().mean()
@@ -237,8 +231,8 @@ class PPO:
         """
 
         next_values = np.concatenate([values[1:], [[0]]])
-        #deltas = [rew + self.gamma * next_val - val for rew, val, next_val in zip(rewards, values, next_values)]
-        deltas = rewards + self.gamma*next_values - values
+        deltas = [rew + self.gamma * next_val - val for rew, val, next_val in zip(rewards, values, next_values)]
+        #deltas = rewards + self.gamma*next_values - values
 
         gaes = [deltas[-1]]
         for i in reversed(range(len(deltas)-1)):
@@ -313,7 +307,10 @@ class PPO:
             rollout_adv = self.calculate_gaes(rollout_reward, rollout_values)
             advantages.append(rollout_adv)
             ep_rewards.append(ep_reward)
-            self.logger["eps_rewards"].append(ep_reward)
+            self.logger.raw_eps_rewards.append(ep_reward)
+
+            # change rolling average
+            self.logger.change_rolling_average()
 
             # Get returns
 
@@ -359,10 +356,13 @@ class PPO:
                 None
         """
         print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
-        print(f"{self.rollouts_per_batch} timesteps per batch for a total of {total_timesteps} timesteps")
+        print(f"{self.rollouts_per_batch} timesteps per batch for a total of {total_timesteps} rollouts")
         t_so_far = 0 # Timesteps simulated so far
         i_so_far = 0 # Iterations ran so far
-        while t_so_far < total_timesteps:                                                                      
+        pbar = tqdm(range(0, total_timesteps, 1), desc=f"Rollouts") 
+
+        for i_so_far in pbar:      
+
             obs, actions, advantages, returns, act_log_probs, ep_reward = self.rollout(env) 
             
             # Calculate how many timesteps we collected this batch
@@ -372,18 +372,18 @@ class PPO:
             i_so_far += 1
 
             # Logging timesteps so far and iterations so far
-            self.logger['t_so_far'] = t_so_far
-            self.logger['i_so_far'] = i_so_far
+            self.logger.t_so_far = t_so_far
+            self.logger.i_so_far= i_so_far
 
             # normalize returns and advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             returns = (returns - returns.mean()) / (returns.std() + 1e-10)
 
             # This is the loop where we update our network for some n epochs
             for iters in range(self.n_updates_per_iteration):
                 mean_kld_track = []
                 for mb_obs, mb_actions, mb_advantages, mb_returns, mb_act_log_probs in \
-                    self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=100):  
+                    self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=200//4):  
                     self.actor_optim.zero_grad()
                     self.critic_optim.zero_grad()
 
@@ -405,17 +405,20 @@ class PPO:
                     # steady updates wanted, so if we change too much we cancel the training entirely and
                     # run the next n rollouts.
                     #kld = t.abs((curr_log_probs - mb_act_log_probs).mean())
+                    #mean_kld_track.append(kld)
                     #kld = sum(mean_kld_track)/len(mean_kld_track)
                     #print(kld)
                     #if kld >= self.target_kld:
                         #print("Break KLD", kld)
                         #print("no iters, ", iters)
-                        #break
+                    #    break
 
                     # Calculate gradients and perform backward propagation for both network
                     
                     actor_loss.backward(retain_graph=True)
+                    nn.utils.clip_grad_norm_(self.actor.parameters(), 5)
                     critic_loss.backward()
+                    nn.utils.clip_grad_norm_(self.critic.parameters(), 5)
                     self.actor_optim.step()
                     self.critic_optim.step()
 
@@ -426,12 +429,14 @@ class PPO:
                     mean_kld_track.append(0)
 
                 
-                self.logger['actor_losses'].append(actor_loss.cpu().detach())
+                self.logger.actor_losses.append(actor_loss.cpu().detach())
+
+                pbar.set_postfix({"loss": self.logger.rolling_avg})
 
                 
 
             # Print a summary of our training so far
-            self._log_summary(ep_reward, obs.shape[0])
+            #self._log_summary(ep_reward, obs.shape[0])
 
     def create_minibatches(self, obs, actions, advantages, returns, act_log_probs,
                         batch_size=64, shuffle=True):
@@ -500,16 +505,16 @@ class PPO:
             Return:
                 None
         """
-        delta_t = self.logger['delta_t']
-        self.logger['delta_t'] = time.time_ns()
-        delta_t = (self.logger['delta_t'] - delta_t) / 1e9
+        delta_t = self.logger.delta_t
+        self.logger.delta_t = time.time_ns()
+        delta_t = (self.logger.delta_t - delta_t) / 1e9
         delta_t = str(round(delta_t, 2))
 
-        t_so_far = self.logger['t_so_far']
-        i_so_far = self.logger['i_so_far']
-        avg_ep_lens = np.mean(self.logger['batch_lens'])
-        avg_ep_rews = np.mean([np.sum(ep_rews) for ep_rews in self.logger['batch_rews']])
-        avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger['actor_losses']])
+        t_so_far = self.logger.t_so_far
+        i_so_far = self.logger.i_so_far
+        avg_ep_lens = np.mean(self.logger.batch_lens)
+        avg_ep_rews = np.mean([np.sum(ep_rews) for ep_rews in self.logger.batch_rews])
+        avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger.actor_losses])
 
         # Round decimal places for more aesthetic logging messages
         avg_ep_lens = str(round(avg_ep_lens, 2))
