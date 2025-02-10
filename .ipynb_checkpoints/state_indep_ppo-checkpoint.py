@@ -182,8 +182,12 @@ class PPO:
 
         log_prob = dist.log_prob(action)
 
-        return action.tolist(), log_prob
-    
+        if rollout=True:
+            return action.tolist(), log_prob
+        else:
+            return action, log_prob
+
+            
     def get_vf(self, obs, rollout=True):
         with t.no_grad():
             #feats = self.backbone(obs)

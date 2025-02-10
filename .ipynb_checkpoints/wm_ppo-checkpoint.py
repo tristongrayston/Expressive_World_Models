@@ -182,7 +182,7 @@ class PPO:
 
         log_prob = dist.log_prob(action)
 
-        if rollout=True:
+        if rollout==True:
             return action.tolist(), log_prob
         else:
             return action, log_prob
@@ -349,7 +349,7 @@ class PPO:
 
         return b_obs, actions, advantages, returns, act_log_probs, ep_rewards
 
-    def learn(self, total_timesteps, env):
+    def learn(self, total_timesteps, obs, actions, advantages, returns, act_log_probs, ep_reward):
         """
             Train the actor and critic networks. Here is where the main PPO algorithm resides.
 
@@ -359,88 +359,64 @@ class PPO:
             Return:
                 None
         """
-        print(f"Learning... Running {self.max_timesteps_per_episode} timesteps per episode, ", end='')
-        print(f"{self.rollouts_per_batch} timesteps per batch for a total of {total_timesteps} rollouts")
-        t_so_far = 0 # Timesteps simulated so far
-        i_so_far = 0 # Iterations ran so far
-        pbar = tqdm(range(0, total_timesteps, 1), desc=f"Rollouts") 
+    
+        # normalize returns and advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        returns = (returns - returns.mean()) / (returns.std() + 1e-10)
 
-        for i_so_far in pbar:      
+        # This is the loop where we update our network for some n epochs
+        for iters in range(self.n_updates_per_iteration):
+            mean_kld_track = []
+            for mb_obs, mb_actions, mb_advantages, mb_returns, mb_act_log_probs in \
+                self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=200//4):  
+                self.actor_optim.zero_grad()
+                self.critic_optim.zero_grad()
 
-            obs, actions, advantages, returns, act_log_probs, ep_reward = self.rollout(env) 
+                # Calculate V_phi and pi_theta(a_t | s_t)
+                V, curr_log_probs, entropy = self.evaluate(mb_obs, mb_actions)
+
+                V = V.view(-1, 1)
+                curr_log_probs = curr_log_probs.view(-1, 1)
+
+                ratios = t.exp(curr_log_probs - mb_act_log_probs)
+
+                # Calculate surrogate losses.
+                surr1 = ratios * mb_advantages
+                surr2 = t.clamp(ratios, 1 - self.clip, 1 + self.clip) * mb_advantages
+
+                actor_loss = -(t.min(surr1, surr2)).mean() - self.entropy_coeff * entropy
+                critic_loss = nn.MSELoss()(V, mb_returns)
+
+                # steady updates wanted, so if we change too much we cancel the training entirely and
+                # run the next n rollouts.
+                #kld = t.abs((curr_log_probs - mb_act_log_probs).mean())
+                #mean_kld_track.append(kld)
+                #kld = sum(mean_kld_track)/len(mean_kld_track)
+                #print(kld)
+                #if kld >= self.target_kld:
+                    #print("Break KLD", kld)
+                    #print("no iters, ", iters)
+                #    break
+
+                # Calculate gradients and perform backward propagation for both network
+                
+                actor_loss.backward(retain_graph=True)
+                nn.utils.clip_grad_norm_(self.actor.parameters(), 5)
+                critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), 5)
+                self.actor_optim.step()
+                self.critic_optim.step()
+
+                # Log actor loss
+                #print("actor loss: ", actor_loss.detach().item())
+
+                
+                mean_kld_track.append(0)
+
             
-            # Calculate how many timesteps we collected this batch
-            t_so_far += obs.shape[0]
 
-            # Increment the number of iterations
-            i_so_far += 1
-
-            # Logging timesteps so far and iterations so far
-            self.logger.t_so_far = t_so_far
-            self.logger.i_so_far= i_so_far
-
-            # normalize returns and advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            returns = (returns - returns.mean()) / (returns.std() + 1e-10)
-
-            # This is the loop where we update our network for some n epochs
-            for iters in range(self.n_updates_per_iteration):
-                mean_kld_track = []
-                for mb_obs, mb_actions, mb_advantages, mb_returns, mb_act_log_probs in \
-                    self.create_minibatches(obs, actions, advantages, returns, act_log_probs, batch_size=200//4):  
-                    self.actor_optim.zero_grad()
-                    self.critic_optim.zero_grad()
-
-                    # Calculate V_phi and pi_theta(a_t | s_t)
-                    V, curr_log_probs, entropy = self.evaluate(mb_obs, mb_actions)
-
-                    V = V.view(-1, 1)
-                    curr_log_probs = curr_log_probs.view(-1, 1)
-
-                    ratios = t.exp(curr_log_probs - mb_act_log_probs)
-
-                    # Calculate surrogate losses.
-                    surr1 = ratios * mb_advantages
-                    surr2 = t.clamp(ratios, 1 - self.clip, 1 + self.clip) * mb_advantages
-
-                    actor_loss = -(t.min(surr1, surr2)).mean() - self.entropy_coeff * entropy
-                    critic_loss = nn.MSELoss()(V, mb_returns)
-
-                    # steady updates wanted, so if we change too much we cancel the training entirely and
-                    # run the next n rollouts.
-                    #kld = t.abs((curr_log_probs - mb_act_log_probs).mean())
-                    #mean_kld_track.append(kld)
-                    #kld = sum(mean_kld_track)/len(mean_kld_track)
-                    #print(kld)
-                    #if kld >= self.target_kld:
-                        #print("Break KLD", kld)
-                        #print("no iters, ", iters)
-                    #    break
-
-                    # Calculate gradients and perform backward propagation for both network
-                    
-                    actor_loss.backward(retain_graph=True)
-                    nn.utils.clip_grad_norm_(self.actor.parameters(), 5)
-                    critic_loss.backward()
-                    nn.utils.clip_grad_norm_(self.critic.parameters(), 5)
-                    self.actor_optim.step()
-                    self.critic_optim.step()
-
-                    # Log actor loss
-                    #print("actor loss: ", actor_loss.detach().item())
-
-                    
-                    mean_kld_track.append(0)
-
-                
-                self.logger.actor_losses.append(actor_loss.cpu().detach())
-
-                pbar.set_postfix({"loss": self.logger.rolling_avg})
-
-                
-
-            # Print a summary of our training so far
-            #self._log_summary(ep_reward, obs.shape[0])
+        # Print a summary of our training so far
+        #self._log_summary(ep_reward, obs.shape[0])
 
     def create_minibatches(self, obs, actions, advantages, returns, act_log_probs,
                         batch_size=64, shuffle=True):
