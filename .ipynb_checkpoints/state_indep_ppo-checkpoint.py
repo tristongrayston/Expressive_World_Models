@@ -182,7 +182,7 @@ class PPO:
 
         log_prob = dist.log_prob(action)
 
-        if rollout=True:
+        if rollout==True:
             return action.tolist(), log_prob
         else:
             return action, log_prob
@@ -349,7 +349,7 @@ class PPO:
 
         return b_obs, actions, advantages, returns, act_log_probs, ep_rewards
 
-    def learn(self, total_timesteps, env):
+    def learn(self, total_timesteps, env, rollout_buffer):
         """
             Train the actor and critic networks. Here is where the main PPO algorithm resides.
 
@@ -363,21 +363,27 @@ class PPO:
         print(f"{self.rollouts_per_batch} timesteps per batch for a total of {total_timesteps} rollouts")
         t_so_far = 0 # Timesteps simulated so far
         i_so_far = 0 # Iterations ran so far
+        it_so_far = 0 # Iterations ran so far
         pbar = tqdm(range(0, total_timesteps, 1), desc=f"Rollouts") 
 
         for i_so_far in pbar:      
 
             obs, actions, advantages, returns, act_log_probs, ep_reward = self.rollout(env) 
+
+            #rollout_buffer.append([obs, actions])
             
             # Calculate how many timesteps we collected this batch
             t_so_far += obs.shape[0]
 
             # Increment the number of iterations
+            it_so_far += 1
             i_so_far += 1
 
             # Logging timesteps so far and iterations so far
             self.logger.t_so_far = t_so_far
             self.logger.i_so_far= i_so_far
+
+            rollout_buffer.append([obs, actions])
 
             # normalize returns and advantages
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -437,10 +443,16 @@ class PPO:
 
                 pbar.set_postfix({"loss": self.logger.rolling_avg})
 
+            if self.logger.rolling_avg > -300 and it_so_far > 100:
+                print("Achieves a rolling average loss of greater than -300, which is considered optimal. Breaking training loop...") 
+                #break
+
                 
 
             # Print a summary of our training so far
             #self._log_summary(ep_reward, obs.shape[0])
+
+        return rollout_buffer
 
     def create_minibatches(self, obs, actions, advantages, returns, act_log_probs,
                         batch_size=64, shuffle=True):

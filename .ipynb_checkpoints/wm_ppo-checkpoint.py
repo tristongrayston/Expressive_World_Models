@@ -321,6 +321,9 @@ class PPO:
             ep_returns = self.discount_rewards(rollout_reward)
             returns.append(ep_returns)
 
+            # Print cumulative rollout rewards 
+            print("#### Rollout Reward:", rollout_reward, " ####")
+
         # turn things into tensors
         b_obs = t.stack(b_obs, dim=0)
         
@@ -359,7 +362,8 @@ class PPO:
             Return:
                 None
         """
-    
+
+        
         # normalize returns and advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = (returns - returns.mean()) / (returns.std() + 1e-10)
@@ -409,9 +413,6 @@ class PPO:
 
                 # Log actor loss
                 #print("actor loss: ", actor_loss.detach().item())
-
-                
-                mean_kld_track.append(0)
 
             
 

@@ -34,11 +34,11 @@ def train_ppo(env_name):
     
     # 3. Train the agent
     total_timesteps = 2000//5  # Decide how long you want to train
-    agent.learn(total_timesteps=total_timesteps, env=env)
+    rollout_buffer = agent.learn(total_timesteps=total_timesteps, env=env, rollout_buffer = [])
     
     # 4. Close the environment
     env.close()
-    return agent
+    return agent, rollout_buffer
 
 def test_ppo(ppo_agent, env_name):
     # Create the environment in 'human' render mode so it shows visualization
