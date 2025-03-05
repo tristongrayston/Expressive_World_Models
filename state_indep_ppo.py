@@ -445,7 +445,7 @@ class PPO:
 
             if self.logger.rolling_avg > -300 and it_so_far > 100:
                 print("Achieves a rolling average loss of greater than -300, which is considered optimal. Breaking training loop...") 
-                #break
+                break
 
                 
 
