@@ -1,7 +1,7 @@
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-
+import seaborn as sns
 
 class logger():
     def __init__(self, window_size):
@@ -37,6 +37,7 @@ class logger():
         """
 
         # Create a new figure
+        sns.set()
         plt.figure(figsize=(8, 6))
 
         # Plot the raw episode rewards
